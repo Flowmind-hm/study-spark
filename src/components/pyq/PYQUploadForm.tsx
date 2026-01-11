@@ -20,9 +20,9 @@ interface PYQUploadFormProps {
   uploadedDocs: Array<{
     id: string;
     filename: string;
-    subject?: string | null;
-    semester?: number | null;
-    academic_year?: string | null;
+    subject?: string;
+    semester?: number;
+    academic_year?: string;
   }>;
 }
 
