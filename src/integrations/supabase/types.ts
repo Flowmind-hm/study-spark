@@ -26,6 +26,7 @@ export type Database = {
           id: string
           session_id: string
           updated_at: string
+          user_id: string | null
         }
         Insert: {
           category?: string
@@ -38,6 +39,7 @@ export type Database = {
           id?: string
           session_id: string
           updated_at?: string
+          user_id?: string | null
         }
         Update: {
           category?: string
@@ -50,6 +52,34 @@ export type Database = {
           id?: string
           session_id?: string
           updated_at?: string
+          user_id?: string | null
+        }
+        Relationships: []
+      }
+      profiles: {
+        Row: {
+          created_at: string
+          display_name: string | null
+          email: string | null
+          id: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          display_name?: string | null
+          email?: string | null
+          id?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          display_name?: string | null
+          email?: string | null
+          id?: string
+          updated_at?: string
+          user_id?: string
         }
         Relationships: []
       }

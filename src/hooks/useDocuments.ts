@@ -1,29 +1,34 @@
 import { useState, useCallback, useEffect } from 'react';
 import { supabase } from '@/integrations/supabase/client';
+import { useAuth } from '@/contexts/AuthContext';
+import { toast } from 'sonner';
 
-// Generate a unique session ID for anonymous users
-const getSessionId = () => {
-  let sessionId = localStorage.getItem('study_session_id');
-  if (!sessionId) {
-    sessionId = `session_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-    localStorage.setItem('study_session_id', sessionId);
-  }
-  return sessionId;
-};
+interface Document {
+  id: string;
+  filename: string;
+  file_path: string;
+  file_type: string;
+  file_size: number;
+  category: string;
+  extracted_text: string | null;
+  created_at: string;
+}
 
 export const useDocuments = (category: string = 'general') => {
-  const [documents, setDocuments] = useState<any[]>([]);
+  const { user, session } = useAuth();
+  const [documents, setDocuments] = useState<Document[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const sessionId = getSessionId();
 
   const fetchDocuments = useCallback(async () => {
+    if (!user) return;
+
     setIsLoading(true);
     try {
       const { data, error } = await supabase
         .from('documents')
         .select('*')
-        .eq('session_id', sessionId)
+        .eq('user_id', user.id)
         .eq('category', category)
         .order('created_at', { ascending: false });
 
@@ -35,9 +40,14 @@ export const useDocuments = (category: string = 'general') => {
     } finally {
       setIsLoading(false);
     }
-  }, [sessionId, category]);
+  }, [user, category]);
 
   const uploadDocument = useCallback(async (file: File) => {
+    if (!user || !session) {
+      toast.error('Please sign in to upload documents');
+      return null;
+    }
+
     setIsLoading(true);
     setError(null);
 
@@ -45,14 +55,13 @@ export const useDocuments = (category: string = 'general') => {
       const formData = new FormData();
       formData.append('file', file);
       formData.append('category', category);
-      formData.append('sessionId', sessionId);
 
       const response = await fetch(
         `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/upload-document`,
         {
           method: 'POST',
           headers: {
-            Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+            Authorization: `Bearer ${session.access_token}`,
           },
           body: formData,
         }
@@ -64,38 +73,50 @@ export const useDocuments = (category: string = 'general') => {
         throw new Error(result.error || 'Upload failed');
       }
 
-      // Refresh documents list
+      toast.success(`${file.name} uploaded successfully`);
       await fetchDocuments();
       return result.document;
     } catch (err) {
       console.error('Upload error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to upload document');
+      const errorMsg = err instanceof Error ? err.message : 'Failed to upload document';
+      setError(errorMsg);
+      toast.error(errorMsg);
       throw err;
     } finally {
       setIsLoading(false);
     }
-  }, [sessionId, category, fetchDocuments]);
+  }, [user, session, category, fetchDocuments]);
 
-  const deleteDocument = useCallback(async (documentId: string) => {
+  const deleteDocument = useCallback(async (documentId: string, filePath?: string) => {
+    if (!user) return;
+
     try {
+      // Delete from storage if path provided
+      if (filePath) {
+        await supabase.storage.from('documents').remove([filePath]);
+      }
+
       const { error } = await supabase
         .from('documents')
         .delete()
         .eq('id', documentId)
-        .eq('session_id', sessionId);
+        .eq('user_id', user.id);
 
       if (error) throw error;
+      toast.success('Document deleted');
       await fetchDocuments();
     } catch (err) {
       console.error('Delete error:', err);
       setError(err instanceof Error ? err.message : 'Failed to delete document');
       throw err;
     }
-  }, [sessionId, fetchDocuments]);
+  }, [user, fetchDocuments]);
 
   useEffect(() => {
-    fetchDocuments();
-  }, [fetchDocuments]);
+    if (user) {
+      fetchDocuments();
+    }
+  }, [user, fetchDocuments]);
 
   return {
     documents,
@@ -104,6 +125,5 @@ export const useDocuments = (category: string = 'general') => {
     uploadDocument,
     deleteDocument,
     refetch: fetchDocuments,
-    sessionId,
   };
 };

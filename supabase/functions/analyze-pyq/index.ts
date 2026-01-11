@@ -12,12 +12,38 @@ serve(async (req) => {
   }
 
   try {
-    const { sessionId } = await req.json();
-    
-    if (!sessionId) {
+    // Validate authorization header
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader?.startsWith("Bearer ")) {
       return new Response(
-        JSON.stringify({ error: "sessionId is required" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Create Supabase client with user's token
+    const supabase = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_ANON_KEY")!,
+      { global: { headers: { Authorization: authHeader } } }
+    );
+
+    // Validate JWT and get user
+    const token = authHeader.replace("Bearer ", "");
+    const { data: claimsData, error: claimsError } = await supabase.auth.getClaims(token);
+    
+    if (claimsError || !claimsData?.claims) {
+      return new Response(
+        JSON.stringify({ error: "Invalid token" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const userId = claimsData.claims.sub;
+    if (!userId) {
+      return new Response(
+        JSON.stringify({ error: "User ID not found in token" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
@@ -26,16 +52,17 @@ serve(async (req) => {
       throw new Error("LOVABLE_API_KEY is not configured");
     }
 
-    const supabase = createClient(
+    // Use service role for database operations
+    const serviceClient = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    // Fetch PYQ documents
-    const { data: documents, error: dbError } = await supabase
+    // Fetch PYQ documents for this user
+    const { data: documents, error: dbError } = await serviceClient
       .from("documents")
       .select("filename, extracted_text, file_type")
-      .eq("session_id", sessionId)
+      .eq("user_id", userId)
       .eq("category", "pyq");
 
     if (dbError) {
@@ -53,10 +80,14 @@ serve(async (req) => {
       );
     }
 
-    // Build context from documents
+    // Build context from documents (limit size)
     let documentContext = documents.map((doc, i) => 
-      `[Question Paper ${i + 1}: ${doc.filename}]\n${doc.extracted_text || ""}`
+      `[Question Paper ${i + 1}: ${doc.filename}]\n${(doc.extracted_text || "").substring(0, 20000)}`
     ).join("\n\n");
+
+    if (documentContext.length > 50000) {
+      documentContext = documentContext.substring(0, 50000) + "\n[Content truncated...]";
+    }
 
     const prompt = `Analyze the following Previous Year Question papers and provide:
 

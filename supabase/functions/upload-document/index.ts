@@ -6,38 +6,111 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+// Allowed file types and categories
+const ALLOWED_CATEGORIES = ["research", "notes", "pyq", "general"] as const;
+const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
+const ALLOWED_FILE_TYPES = [
+  "application/pdf",
+  "text/plain",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "image/png",
+  "image/jpeg",
+  "image/jpg",
+  "image/webp",
+];
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
+    // Validate authorization header
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader?.startsWith("Bearer ")) {
+      return new Response(
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Create Supabase client with user's token
+    const supabase = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_ANON_KEY")!,
+      { global: { headers: { Authorization: authHeader } } }
+    );
+
+    // Validate JWT and get user
+    const token = authHeader.replace("Bearer ", "");
+    const { data: claimsData, error: claimsError } = await supabase.auth.getClaims(token);
+    
+    if (claimsError || !claimsData?.claims) {
+      return new Response(
+        JSON.stringify({ error: "Invalid token" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const userId = claimsData.claims.sub;
+    if (!userId) {
+      return new Response(
+        JSON.stringify({ error: "User ID not found in token" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     const formData = await req.formData();
     const file = formData.get("file") as File;
-    const category = formData.get("category") as string || "general";
-    const sessionId = formData.get("sessionId") as string;
+    const categoryInput = formData.get("category") as string || "general";
 
-    if (!file || !sessionId) {
+    // Validate file
+    if (!file) {
       return new Response(
-        JSON.stringify({ error: "File and sessionId are required" }),
+        JSON.stringify({ error: "File is required" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    const supabase = createClient(
+    // Validate file size
+    if (file.size > MAX_FILE_SIZE) {
+      return new Response(
+        JSON.stringify({ error: "File size exceeds 50MB limit" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Validate file type
+    const fileType = file.type || "application/octet-stream";
+    const fileExt = file.name.split(".").pop()?.toLowerCase();
+    const isAllowedType = ALLOWED_FILE_TYPES.includes(fileType) || 
+                          ["pdf", "txt", "doc", "docx", "png", "jpg", "jpeg", "webp", "md"].includes(fileExt || "");
+    
+    if (!isAllowedType) {
+      return new Response(
+        JSON.stringify({ error: "File type not allowed" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Validate category
+    const category = ALLOWED_CATEGORIES.includes(categoryInput as any) ? categoryInput : "general";
+
+    // Use service role for storage and database operations
+    const serviceClient = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    // Generate unique file path
-    const fileExt = file.name.split(".").pop();
-    const filePath = `${sessionId}/${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
+    // Generate unique file path using user ID
+    const filePath = `${userId}/${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
 
     // Upload file to storage
-    const { error: uploadError } = await supabase.storage
+    const { error: uploadError } = await serviceClient.storage
       .from("documents")
       .upload(filePath, file, {
-        contentType: file.type,
+        contentType: fileType,
         upsert: false,
       });
 
@@ -52,36 +125,40 @@ serve(async (req) => {
     // Extract text based on file type
     let extractedText = "";
     
-    // For text-based files, extract content
-    if (file.type === "text/plain" || file.name.endsWith(".txt") || file.name.endsWith(".md")) {
+    if (fileType === "text/plain" || fileExt === "txt" || fileExt === "md") {
       extractedText = await file.text();
-    } else if (file.type === "application/pdf" || file.name.endsWith(".pdf")) {
-      // For PDF files, we'll use AI to extract content later
+      // Limit extracted text length
+      if (extractedText.length > 100000) {
+        extractedText = extractedText.substring(0, 100000) + "\n[Content truncated...]";
+      }
+    } else if (fileType === "application/pdf" || fileExt === "pdf") {
       extractedText = `[PDF Document: ${file.name}] - Content will be analyzed by AI`;
-    } else if (file.type.startsWith("image/")) {
-      // For images, mark for OCR processing
+    } else if (fileType.startsWith("image/")) {
       extractedText = `[Image: ${file.name}] - Visual content will be analyzed by AI`;
-    } else if (file.name.endsWith(".docx") || file.name.endsWith(".doc")) {
+    } else if (fileExt === "docx" || fileExt === "doc") {
       extractedText = `[Word Document: ${file.name}] - Content will be analyzed by AI`;
     }
 
     // Store document metadata in database
-    const { data: docData, error: dbError } = await supabase
+    const { data: docData, error: dbError } = await serviceClient
       .from("documents")
       .insert({
-        filename: file.name,
+        filename: file.name.substring(0, 255), // Limit filename length
         file_path: filePath,
-        file_type: file.type || "application/octet-stream",
+        file_type: fileType,
         file_size: file.size,
         extracted_text: extractedText,
         category: category,
-        session_id: sessionId,
+        session_id: userId, // Keep for backwards compatibility
+        user_id: userId,
       })
       .select()
       .single();
 
     if (dbError) {
       console.error("Database error:", dbError);
+      // Clean up uploaded file
+      await serviceClient.storage.from("documents").remove([filePath]);
       return new Response(
         JSON.stringify({ error: "Failed to save document metadata" }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }

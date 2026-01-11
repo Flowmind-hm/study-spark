@@ -27,8 +27,8 @@ const sampleFlowchart = `flowchart TD
 
 const ResearchPage = () => {
   const [activeTab, setActiveTab] = useState("upload");
-  const { documents, uploadDocument, isLoading: isUploading, sessionId } = useDocuments("research");
-  const { messages, isLoading: isChatLoading, sendMessage, clearMessages } = useStudyChat({ sessionId, category: "research" });
+  const { documents, uploadDocument, isLoading: isUploading } = useDocuments("research");
+  const { messages, isLoading: isChatLoading, sendMessage, clearMessages } = useStudyChat({ category: "research" });
 
   return (
     <div className="min-h-screen bg-background">

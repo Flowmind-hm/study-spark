@@ -6,36 +6,100 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+const ALLOWED_CATEGORIES = ["research", "notes", "pyq", "general"] as const;
+const MAX_MESSAGES = 50;
+const MAX_MESSAGE_LENGTH = 10000;
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
-    const { messages, sessionId, category } = await req.json();
-    
-    if (!messages || !sessionId) {
+    // Validate authorization header
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader?.startsWith("Bearer ")) {
       return new Response(
-        JSON.stringify({ error: "Messages and sessionId are required" }),
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Create Supabase client with user's token
+    const supabase = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_ANON_KEY")!,
+      { global: { headers: { Authorization: authHeader } } }
+    );
+
+    // Validate JWT and get user
+    const token = authHeader.replace("Bearer ", "");
+    const { data: claimsData, error: claimsError } = await supabase.auth.getClaims(token);
+    
+    if (claimsError || !claimsData?.claims) {
+      return new Response(
+        JSON.stringify({ error: "Invalid token" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const userId = claimsData.claims.sub;
+    if (!userId) {
+      return new Response(
+        JSON.stringify({ error: "User ID not found in token" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const body = await req.json();
+    const { messages, category: categoryInput } = body;
+
+    // Validate messages
+    if (!messages || !Array.isArray(messages)) {
+      return new Response(
+        JSON.stringify({ error: "Messages array is required" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
+
+    if (messages.length > MAX_MESSAGES) {
+      return new Response(
+        JSON.stringify({ error: `Maximum ${MAX_MESSAGES} messages allowed` }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Validate and sanitize each message
+    const sanitizedMessages = messages.map((msg: any) => {
+      if (!msg.role || !["user", "assistant"].includes(msg.role)) {
+        throw new Error("Invalid message role");
+      }
+      if (typeof msg.content !== "string") {
+        throw new Error("Message content must be a string");
+      }
+      const content = msg.content.substring(0, MAX_MESSAGE_LENGTH);
+      return { role: msg.role, content };
+    });
+
+    // Validate category
+    const category = ALLOWED_CATEGORIES.includes(categoryInput) ? categoryInput : "general";
 
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     if (!LOVABLE_API_KEY) {
       throw new Error("LOVABLE_API_KEY is not configured");
     }
 
-    const supabase = createClient(
+    // Use service role to fetch documents
+    const serviceClient = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    // Fetch documents for this session
-    let query = supabase
+    // Fetch documents for this user
+    let query = serviceClient
       .from("documents")
       .select("filename, extracted_text, file_type, category")
-      .eq("session_id", sessionId);
+      .eq("user_id", userId);
 
     if (category && category !== "general") {
       query = query.eq("category", category);
@@ -133,7 +197,7 @@ If no documents are uploaded, explain your capabilities and ask the user to uplo
         model: "google/gemini-3-flash-preview",
         messages: [
           { role: "system", content: systemPrompt },
-          ...messages,
+          ...sanitizedMessages,
         ],
         stream: true,
       }),
