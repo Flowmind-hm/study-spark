@@ -1,4 +1,5 @@
 import { useState, useCallback } from 'react';
+import { useAuth } from '@/contexts/AuthContext';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -6,16 +7,21 @@ interface Message {
 }
 
 interface UseStudyChatOptions {
-  sessionId: string;
   category: string;
 }
 
-export const useStudyChat = ({ sessionId, category }: UseStudyChatOptions) => {
+export const useStudyChat = ({ category }: UseStudyChatOptions) => {
+  const { user, session } = useAuth();
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const sendMessage = useCallback(async (content: string) => {
+    if (!user || !session) {
+      setError('Please sign in to use the chat');
+      return 'Please sign in to use the chat.';
+    }
+
     const userMessage: Message = { role: 'user', content };
     setMessages(prev => [...prev, userMessage]);
     setIsLoading(true);
@@ -30,11 +36,10 @@ export const useStudyChat = ({ sessionId, category }: UseStudyChatOptions) => {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+            Authorization: `Bearer ${session.access_token}`,
           },
           body: JSON.stringify({
             messages: [...messages, userMessage],
-            sessionId,
             category,
           }),
         }
@@ -141,7 +146,7 @@ export const useStudyChat = ({ sessionId, category }: UseStudyChatOptions) => {
     }
 
     return assistantContent;
-  }, [messages, sessionId, category]);
+  }, [messages, user, session, category]);
 
   const clearMessages = useCallback(() => {
     setMessages([]);

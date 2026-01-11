@@ -6,36 +6,78 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+const ALLOWED_TYPES = ["quiz", "flashcards", "summary", "flowchart"] as const;
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
-    const { sessionId, type } = await req.json();
-    
-    if (!sessionId || !type) {
+    // Validate authorization header
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader?.startsWith("Bearer ")) {
       return new Response(
-        JSON.stringify({ error: "sessionId and type are required" }),
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Create Supabase client with user's token
+    const supabase = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_ANON_KEY")!,
+      { global: { headers: { Authorization: authHeader } } }
+    );
+
+    // Validate JWT and get user
+    const token = authHeader.replace("Bearer ", "");
+    const { data: claimsData, error: claimsError } = await supabase.auth.getClaims(token);
+    
+    if (claimsError || !claimsData?.claims) {
+      return new Response(
+        JSON.stringify({ error: "Invalid token" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const userId = claimsData.claims.sub;
+    if (!userId) {
+      return new Response(
+        JSON.stringify({ error: "User ID not found in token" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const body = await req.json();
+    const { type: typeInput } = body;
+    
+    // Validate type
+    if (!typeInput || !ALLOWED_TYPES.includes(typeInput)) {
+      return new Response(
+        JSON.stringify({ error: "Invalid type. Use: quiz, flashcards, summary, or flowchart" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
+
+    const type = typeInput as typeof ALLOWED_TYPES[number];
 
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     if (!LOVABLE_API_KEY) {
       throw new Error("LOVABLE_API_KEY is not configured");
     }
 
-    const supabase = createClient(
+    // Use service role for database operations
+    const serviceClient = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    // Fetch documents for this session
-    const { data: documents, error: dbError } = await supabase
+    // Fetch documents for this user
+    const { data: documents, error: dbError } = await serviceClient
       .from("documents")
       .select("filename, extracted_text, file_type")
-      .eq("session_id", sessionId)
+      .eq("user_id", userId)
       .eq("category", "notes");
 
     if (dbError) {
@@ -53,10 +95,14 @@ serve(async (req) => {
       );
     }
 
-    // Build context from documents
+    // Build context from documents (limit size)
     let documentContext = documents.map((doc, i) => 
-      `[Document ${i + 1}: ${doc.filename}]\n${doc.extracted_text || ""}`
+      `[Document ${i + 1}: ${doc.filename}]\n${(doc.extracted_text || "").substring(0, 20000)}`
     ).join("\n\n");
+
+    if (documentContext.length > 50000) {
+      documentContext = documentContext.substring(0, 50000) + "\n[Content truncated...]";
+    }
 
     let prompt = "";
     let toolConfig: any = null;
@@ -222,11 +268,6 @@ Return ONLY valid Mermaid.js flowchart syntax starting with "flowchart TD".`;
         ],
         tool_choice: { type: "function", function: { name: "generate_flowchart" } }
       };
-    } else {
-      return new Response(
-        JSON.stringify({ error: "Invalid type. Use: quiz, flashcards, summary, or flowchart" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
     }
 
     // Call Lovable AI
